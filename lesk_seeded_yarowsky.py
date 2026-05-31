@@ -101,3 +101,125 @@ def generate_seeds(instances, target, pos='n',margin_percentile=90):
 
 seeds, unlabeled=generate_seeds(instances,target_word, pos='n',margin_percentile=90)
 print("Seeds:",len(seeds),"Unlabeled:",len(unlabeled))
+
+# Stage-2 yarowsky style bootstrapping with naive bayes classifier
+
+#i.finding out the context features
+
+from sklearn.feature_extraction.text import CountVectorizer
+
+WINDOW = 5  # left/right window size
+
+def context_string(inst):
+    tokens = inst["tokens"]
+    i = inst["target_index"]
+    left = tokens[max(0, i-WINDOW):i]
+    right = tokens[i+1:i+1+WINDOW]
+    ctx = left + right
+    return " ".join(w.lower() for w in ctx)
+
+#ii. training of naive bayes using initial seeds
+from sklearn.naive_bayes import MultinomialNB
+
+# 1) Seed texts + labels
+seed_texts = [context_string(inst) for inst in seeds]
+
+seed_labels = [
+    inst["sense"].name() if hasattr(inst["sense"], "name") else inst["sense"]
+    for inst in seeds
+]
+
+# 2) Vectorizer fit on seed contexts
+vectorizer = CountVectorizer()
+X_seed = vectorizer.fit_transform(seed_texts)
+
+# 3) Train Naive Bayes
+clf = MultinomialNB()
+clf.fit(X_seed, seed_labels)
+
+import numpy as np
+
+def classify_unlabeled(unlabeled, vectorizer, clf, conf_thr=0.9):
+    new_labeled = []
+    still_unlabeled = []
+    for inst in unlabeled:
+        ctx = context_string(inst)
+        x = vectorizer.transform([ctx])
+        probs = clf.predict_proba(x)[0]
+        max_idx = np.argmax(probs)
+        max_prob = probs[max_idx]
+        if max_prob >= conf_thr:
+            inst_copy = inst.copy()
+            inst_copy["sense"] = clf.classes_[max_idx]
+            inst_copy["conf"] = float(max_prob)
+            new_labeled.append(inst_copy)
+        else:
+            still_unlabeled.append(inst)
+    return new_labeled, still_unlabeled
+
+new_labeled, remaining = classify_unlabeled(unlabeled, vectorizer, clf, conf_thr=0.9)
+print("New labeled from NB:", len(new_labeled), "Remaining unlabeled:", len(remaining))
+
+def yarowsky_bootstrap(seeds, unlabeled, max_iter=5, conf_thr=0.9, min_new=1):
+    labeled = seeds[:]       # start from Lesk seeds
+    unl = unlabeled[:]       # remaining instances
+
+    # initial train
+    vectorizer = CountVectorizer()
+    X = vectorizer.fit_transform([context_string(inst) for inst in labeled])
+    y = [
+        inst["sense"].name() if hasattr(inst["sense"], "name") else inst["sense"]
+        for inst in labeled
+    ]
+
+    for it in range(max_iter):
+        clf = MultinomialNB()
+        clf.fit(X, y)
+
+        new_labeled, unl = classify_unlabeled(unl, vectorizer, clf, conf_thr=conf_thr)
+        print(f"Iter {it}: new_labeled = {len(new_labeled)}, remaining = {len(unl)}")
+
+        if len(new_labeled) < min_new:
+            print("Stopping: too few new high-confidence labels.")
+            break
+
+        # add new labeled examples to training set
+        labeled.extend(new_labeled)
+        X = vectorizer.fit_transform([context_string(inst) for inst in labeled])
+        y = [
+            inst["sense"].name() if hasattr(inst["sense"], "name") else inst["sense"]
+            for inst in labeled
+        ]
+
+    return labeled, unl, vectorizer, clf
+
+final_labeled, final_unlabeled, vectorizer, clf = yarowsky_bootstrap(
+    seeds, unlabeled, max_iter=5, conf_thr=0.7, min_new=1
+)
+
+def pretty_print_results(labeled, corpus_sentences):
+    for inst in labeled:
+        doc_id = inst["doc_id"]
+        sent = inst["sentence"]
+        sense_val = inst["sense"]
+
+        # sense_val Synset hai ya string?
+        if hasattr(sense_val, "definition"):      # Synset object
+            syn = sense_val
+            sense_name = syn.name()
+            gloss = syn.definition()
+        else:                                     # string label, e.g. 'bank.n.09'
+            sense_name = sense_val
+            try:
+                syn = wn.synset(sense_name)
+                gloss = syn.definition()
+            except:
+                syn = None
+                gloss = "N/A"
+
+        print(f"[doc {doc_id}] {sent}")
+        print(f"  -> sense: {sense_name}")
+        print(f"     gloss: {gloss}\n")
+print("=== Final labeled instances ===")
+pretty_print_results(final_labeled, corpus_sentences)
+print("Remaining unlabeled:", len(final_unlabeled))
