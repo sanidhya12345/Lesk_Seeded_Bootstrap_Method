@@ -1,5 +1,3 @@
-# multi_lesk_seeded_yarowsky.py
-
 import nltk
 from nltk.corpus import wordnet as wn, semcor
 from nltk.tokenize import word_tokenize
